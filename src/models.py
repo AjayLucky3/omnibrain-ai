@@ -21,6 +21,7 @@ class TextChunk:
     chunk_id: str
     text: str
     page_number: int
+    embedding: list[float] | None = None
 
 
 @dataclass
