@@ -30,26 +30,37 @@ class Retriever:
 
         return results
 
+    def close(self) -> None:
+        """
+        Explicitly close the underlying vector store.
+        """
+
+        self.vector_store.close()
+
 
 if __name__ == "__main__":
     retriever = Retriever()
 
-    query = input("Enter your question: ")
+    try:
+        query = input("Enter your question: ")
 
-    results = retriever.search(
-        query,
-        limit=3,
-    )
+        results = retriever.search(
+            query,
+            limit=3,
+        )
 
-    print("\nSEMANTIC SEARCH RESULTS")
-    print("=" * 60)
+        print("\nSEMANTIC SEARCH RESULTS")
+        print("=" * 60)
 
-    if not results:
-        print("No results found.")
+        if not results:
+            print("No results found.")
 
-    for index, result in enumerate(results, start=1):
-        print(f"\n--- Result {index} ---")
-        print(f"Score: {result.score}")
-        print(f"Chunk ID: {result.payload['chunk_id']}")
-        print(f"Page: {result.payload['page_number']}")
-        print(f"Text: {result.payload['text'][:500]}")
+        for index, result in enumerate(results, start=1):
+            print(f"\n--- Result {index} ---")
+            print(f"Score: {result.score}")
+            print(f"Chunk ID: {result.payload['chunk_id']}")
+            print(f"Page: {result.payload['page_number']}")
+            print(f"Text: {result.payload['text'][:500]}")
+
+    finally:
+        retriever.close()
