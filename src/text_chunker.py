@@ -1,4 +1,4 @@
-from models import Page, TextChunk
+from src.models import Page, TextChunk
 
 
 def chunk_pages(
@@ -9,29 +9,31 @@ def chunk_pages(
     """
     Split document pages into smaller overlapping text chunks.
 
-    Each chunk keeps the page number it came from.
-
-    Args:
-        pages: List of Page objects.
-        chunk_size: Maximum number of characters in each chunk.
-        overlap: Number of characters shared between consecutive chunks.
-
-    Returns:
-        A list of TextChunk objects.
+    Each chunk retains the page number it came from.
     """
 
     if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0")
+
+        raise ValueError(
+            "chunk_size must be greater than 0"
+        )
 
     if overlap < 0:
-        raise ValueError("overlap cannot be negative")
+
+        raise ValueError(
+            "overlap cannot be negative"
+        )
 
     if overlap >= chunk_size:
-        raise ValueError("overlap must be smaller than chunk_size")
+
+        raise ValueError(
+            "overlap must be smaller than chunk_size"
+        )
 
     chunks = []
 
     for page in pages:
+
         text = page.text.strip()
 
         if not text:
@@ -41,13 +43,18 @@ def chunk_pages(
         chunk_number = 1
 
         while start < len(text):
+
             end = start + chunk_size
 
-            chunk_text = text[start:end].strip()
+            chunk_text = text[
+                start:end
+            ].strip()
 
             if chunk_text:
+
                 chunk_id = (
-                    f"page_{page.page_number}_chunk_{chunk_number}"
+                    f"page_{page.page_number}"
+                    f"_chunk_{chunk_number}"
                 )
 
                 chunks.append(
@@ -69,12 +76,14 @@ def chunk_pages(
 
 
 if __name__ == "__main__":
+
     pages = [
         Page(
             page_number=1,
             text=(
-                "NovaTech Industries reported revenue of 120 million "
-                "US dollars in 2023. Revenue increased to 150 million "
+                "NovaTech Industries reported revenue "
+                "of 120 million US dollars in 2023. "
+                "Revenue increased to 150 million "
                 "in 2024."
             ),
         )
@@ -86,12 +95,19 @@ if __name__ == "__main__":
         overlap=20,
     )
 
-    print(f"Created {len(chunks)} chunk(s).\n")
+    print(
+        f"Created {len(chunks)} chunk(s).\n"
+    )
 
     for chunk in chunks:
+
         print(
             f"--- {chunk.chunk_id} | "
             f"Page {chunk.page_number} ---"
         )
-        print(chunk.text)
+
+        print(
+            chunk.text
+        )
+
         print()

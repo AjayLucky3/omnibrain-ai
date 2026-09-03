@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
 
-from models import TextChunk
+from src.models import TextChunk
 
 
 MODEL_NAME = "all-MiniLM-L6-v2"

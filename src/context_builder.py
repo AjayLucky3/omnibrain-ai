@@ -1,8 +1,19 @@
 from dataclasses import dataclass
 import re
 
-from retriever import Retriever
+from src.retriever import Retriever
 
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+SIMILARITY_THRESHOLD = 0.30
+
+
+# ============================================================
+# RETRIEVED CONTEXT
+# ============================================================
 
 @dataclass
 class RetrievedContext:
@@ -17,6 +28,10 @@ class RetrievedContext:
     document_id: str
     score: float
 
+
+# ============================================================
+# CONTEXT BUILDER
+# ============================================================
 
 class ContextBuilder:
     """
@@ -79,11 +94,9 @@ class ContextBuilder:
         """
         Combine semantic similarity with lexical relevance.
 
-        Semantic similarity tells us whether the chunk is
-        conceptually related.
+        Semantic similarity contributes 60%.
 
-        Lexical relevance tells us whether the chunk contains
-        the actual words/entities from the question.
+        Lexical relevance contributes 40%.
         """
 
         scored_contexts = []
@@ -95,8 +108,6 @@ class ContextBuilder:
                 context.text,
             )
 
-            # Semantic score contributes 60%.
-            # Lexical score contributes 40%.
             combined_score = (
                 context.score * 0.60
                 + lexical * 0.40
@@ -130,8 +141,17 @@ class ContextBuilder:
         query: str,
         limit: int = 5,
     ) -> list[RetrievedContext]:
+        """
+        Retrieve relevant chunks from the vector database.
 
+        Weak semantic matches below SIMILARITY_THRESHOLD
+        are discarded before reranking.
+        """
+
+        # ----------------------------------------------------
         # Retrieve more candidates first.
+        # ----------------------------------------------------
+
         results = self.retriever.search(
             query=query,
             limit=max(limit, 5),
@@ -139,7 +159,14 @@ class ContextBuilder:
 
         contexts = []
 
+        # ----------------------------------------------------
+        # FILTER BY SIMILARITY
+        # ----------------------------------------------------
+
         for result in results:
+
+            if result.score < SIMILARITY_THRESHOLD:
+                continue
 
             payload = result.payload
 
@@ -162,7 +189,10 @@ class ContextBuilder:
             contexts=contexts,
         )
 
-        # Return only requested number.
+        # ----------------------------------------------------
+        # RETURN REQUESTED NUMBER
+        # ----------------------------------------------------
+
         return contexts[:limit]
 
     # ========================================================
@@ -201,9 +231,22 @@ if __name__ == "__main__":
         print("RERANKED RETRIEVED CONTEXT")
         print("=" * 60)
 
+        print(
+            f"Similarity threshold: "
+            f"{SIMILARITY_THRESHOLD}"
+        )
+
+        print(
+            f"Results found: "
+            f"{len(contexts)}"
+        )
+
         if not contexts:
 
-            print("No relevant context found.")
+            print()
+            print(
+                "No relevant context found."
+            )
 
         for index, context in enumerate(
             contexts,
@@ -216,27 +259,35 @@ if __name__ == "__main__":
             )
 
             print()
-            print(f"--- Context {index} ---")
+            print(
+                f"--- Context {index} ---"
+            )
+
             print(
                 f"Semantic Score: "
                 f"{context.score:.6f}"
             )
+
             print(
                 f"Lexical Score: "
                 f"{lexical:.6f}"
             )
+
             print(
                 f"Document ID: "
                 f"{context.document_id}"
             )
+
             print(
                 f"Chunk ID: "
                 f"{context.chunk_id}"
             )
+
             print(
                 f"Page: "
                 f"{context.page_number}"
             )
+
             print(
                 f"Text: "
                 f"{context.text[:1000]}"

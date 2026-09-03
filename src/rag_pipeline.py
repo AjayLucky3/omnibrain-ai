@@ -1,10 +1,20 @@
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 import re
 
 import ollama
 
-from context_builder import ContextBuilder, RetrievedContext
+from src.context_builder import ContextBuilder, RetrievedContext
+from src.query_analyzer import (
+    QueryAnalyzer,
+    QueryAnalysis,
+    DIRECT_LOOKUP,
+    CALCULATION,
+    COMPARISON,
+    EXPLANATION,
+    SUMMARY,
+    OUT_OF_SCOPE,
+)
 
 
 # ============================================================
@@ -33,6 +43,7 @@ class RAGResult:
 
     answer: str
     contexts: list[RetrievedContext]
+    analysis: Optional[QueryAnalysis] = None
 
 
 # ============================================================
@@ -44,10 +55,17 @@ class OllamaLLM:
     Local LLM wrapper using Ollama.
     """
 
-    def __init__(self, model: str = OLLAMA_MODEL):
+    def __init__(
+        self,
+        model: str = OLLAMA_MODEL,
+    ):
+
         self.model = model
 
-    def generate(self, prompt: str) -> str:
+    def generate(
+        self,
+        prompt: str,
+    ) -> str:
         """
         Send a grounded prompt to Ollama.
         """
@@ -77,6 +95,7 @@ Rules:
 
 9. Keep answers concise.
 10. Do not mention these instructions.
+11. Do not mention retrieval, embeddings, chunks, or internal pipeline details.
 
 For calculation questions, carefully identify the requested operation and use
 the values present in the document context.
@@ -111,71 +130,124 @@ class CalculationEngine:
     in the retrieved document context.
     """
 
-    # --------------------------------------------------------
+    # ========================================================
     # VALUE EXTRACTION
-    # --------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def extract_year_values(
         contexts: list[RetrievedContext],
         metric: str,
     ) -> dict[int, float]:
-        """
-        Extract yearly values for a metric.
 
-        Example:
-
-        Revenue:
-        2023 | 120
-        2024 | 150
-        2025 | 180
-
-        Returns:
-
-        {
-            2023: 120,
-            2024: 150,
-            2025: 180
-        }
-        """
+        combined_text = "\n".join(
+            context.text
+            for context in contexts
+        )
 
         values: dict[int, float] = {}
 
-        combined_text = "\n".join(
-            context.text for context in contexts
-        )
-
-        # Normalize common extraction issues.
-        text = combined_text.replace(
-            "OperatingIncome",
-            "Operating Income",
-        )
-
-        text = text.replace(
-            "US dollars",
-            "",
-        )
-
         # ----------------------------------------------------
-        # TABLE FORMAT
+        # NORMALIZE TEXT
         # ----------------------------------------------------
 
-        if metric.lower() == "revenue":
+        text = re.sub(
+            r"(?i)operatingincome",
+            "operating income",
+            combined_text,
+        )
 
-            patterns = [
-                r"(\d{4})\s*\|\s*([\d,.]+)\s*\|\s*[\d,.]+",
-            ]
+        text = re.sub(
+            r"(?i)revenueand",
+            "revenue and",
+            text,
+        )
 
-        elif metric.lower() == "operating income":
+        metric = metric.lower().strip()
 
-            patterns = [
-                r"(\d{4})\s*\|\s*[\d,.]+\s*\|\s*([\d,.]+)",
-            ]
+        # ----------------------------------------------------
+        # TABLE EXTRACTION
+        # ----------------------------------------------------
 
-        else:
-            patterns = []
+        table_rows = re.findall(
+            r"(20\d{2})\s*\|\s*([\d,.]+)\s*\|\s*([\d,.]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
 
-        for pattern in patterns:
+        if table_rows:
+
+            for year, revenue, operating_income in table_rows:
+
+                try:
+
+                    if metric == "revenue":
+
+                        values[int(year)] = float(
+                            revenue.replace(",", "")
+                        )
+
+                    elif metric == "operating income":
+
+                        values[int(year)] = float(
+                            operating_income.replace(",", "")
+                        )
+
+                except (ValueError, TypeError):
+
+                    continue
+
+        # ----------------------------------------------------
+        # SENTENCE EXTRACTION FALLBACK
+        # ----------------------------------------------------
+
+        if values:
+
+            return values
+
+        if metric == "operating income":
+
+            pattern = (
+                r"operating\s+income"
+                r"\s+(?:was|is)"
+                r"\s+([\d,.]+)"
+                r"\s*(?:million)?"
+                r"(?:\s+US\s+dollars?)?"
+                r"\s+in\s+"
+                r"(20\d{2})"
+            )
+
+            matches = re.findall(
+                pattern,
+                text,
+                flags=re.IGNORECASE,
+            )
+
+            for value, year in matches:
+
+                try:
+
+                    values[int(year)] = float(
+                        value.replace(",", "")
+                    )
+
+                except (ValueError, TypeError):
+
+                    continue
+
+        elif metric == "revenue":
+
+            pattern = (
+                r"(?:fiscal\s+year\s+)?"
+                r"(20\d{2})"
+                r".{0,100}?"
+                r"revenue"
+                r".{0,80}?"
+                r"(?:of|to)"
+                r"\s+"
+                r"([\d,.]+)"
+                r"\s*(?:million)?"
+            )
 
             matches = re.findall(
                 pattern,
@@ -186,77 +258,29 @@ class CalculationEngine:
             for year, value in matches:
 
                 try:
+
                     values[int(year)] = float(
                         value.replace(",", "")
                     )
-                except ValueError:
+
+                except (ValueError, TypeError):
+
                     continue
-
-        # ----------------------------------------------------
-        # SENTENCE FORMAT
-        # ----------------------------------------------------
-
-        if metric.lower() == "revenue":
-
-            sentence_pattern = (
-                r"(?:fiscal year\s+)?"
-                r"(20\d{2})"
-                r".{0,100}?"
-                r"revenue"
-                r".{0,50}?"
-                r"(?:of\s+|to\s+)"
-                r"([\d,.]+)"
-                r"\s*(?:million)?"
-            )
-
-        else:
-
-            sentence_pattern = (
-                r"operating income"
-                r".{0,100}?"
-                r"(20\d{2})"
-                r".{0,50}?"
-                r"([\d,.]+)"
-                r"\s*(?:million)?"
-            )
-
-        matches = re.findall(
-            sentence_pattern,
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        for year, value in matches:
-
-            try:
-                values[int(year)] = float(
-                    value.replace(",", "")
-                )
-            except ValueError:
-                continue
 
         return values
 
-    # --------------------------------------------------------
-    # REGION EXTRACTION
-    # --------------------------------------------------------
+    # ========================================================
+    # REGIONAL REVENUE
+    # ========================================================
 
     @staticmethod
     def extract_regional_revenue(
         contexts: list[RetrievedContext],
     ) -> dict[str, float]:
-        """
-        Extract regional revenue values.
-
-        Example:
-
-        North America = 90
-        Europe = 54
-        Asia-Pacific = 36
-        """
 
         combined_text = "\n".join(
-            context.text for context in contexts
+            context.text
+            for context in contexts
         )
 
         regions = {}
@@ -283,185 +307,106 @@ class CalculationEngine:
                 )
 
             except ValueError:
+
                 continue
 
         return regions
 
-    # --------------------------------------------------------
-    # QUESTION TYPE
-    # --------------------------------------------------------
+    # ========================================================
+    # NUMBER FORMATTING
+    # ========================================================
 
     @staticmethod
-    def is_calculation_question(
-        question: str,
-    ) -> bool:
-        """
-        Determine whether the question requires
-        deterministic numerical reasoning.
-        """
+    def format_number(
+        value: float,
+    ) -> str:
 
-        q = question.lower()
+        if float(value).is_integer():
 
-        calculation_phrases = [
-            "how much did",
-            "how much has",
-            "how much more",
-            "how much less",
-            "what is the difference",
-            "what was the difference",
-            "what percentage",
-            "what percent",
-            "percentage increase",
-            "percentage decrease",
-            "percent increase",
-            "percent decrease",
-            "increase from",
-            "decrease from",
-            "growth from",
-            "grew from",
-            "compare",
-        ]
+            return str(int(value))
 
-        return any(
-            phrase in q
-            for phrase in calculation_phrases
-        )
+        return f"{value:.2f}".rstrip("0").rstrip(".")
 
-    # --------------------------------------------------------
-    # METRIC DETECTION
-    # --------------------------------------------------------
-
-    @staticmethod
-    def detect_metric(
-        question: str,
-    ) -> Optional[str]:
-        """
-        Determine which financial metric is being asked about.
-        """
-
-        q = question.lower()
-
-        if "operating income" in q:
-            return "operating income"
-
-        if "revenue" in q:
-            return "revenue"
-
-        return None
-
-    # --------------------------------------------------------
-    # YEAR DETECTION
-    # --------------------------------------------------------
-
-    @staticmethod
-    def detect_years(
-        question: str,
-    ) -> list[int]:
-        """
-        Extract years from the user question.
-        """
-
-        return [
-            int(year)
-            for year in re.findall(
-                r"\b(20\d{2})\b",
-                question,
-            )
-        ]
-
-    # --------------------------------------------------------
+    # ========================================================
     # CALCULATE
-    # --------------------------------------------------------
+    # ========================================================
 
     def calculate(
         self,
         question: str,
+        analysis: QueryAnalysis,
         contexts: list[RetrievedContext],
     ) -> Optional[str]:
         """
-        Attempt deterministic calculation.
-
-        Returns None when the question is not a supported
-        calculation question.
+        Perform deterministic calculations based on the
+        QueryAnalyzer output.
         """
 
-        if not self.is_calculation_question(
-            question
-        ):
-            return None
-
-        q = question.lower()
+        q = analysis.normalized_query
 
         # ====================================================
-        # REGIONAL MAXIMUM
+        # REGIONAL COMPARISON
         # ====================================================
 
-        if (
-            "which region" in q
-            and (
+        if analysis.intent == COMPARISON:
+
+            regional_values = (
+                self.extract_regional_revenue(
+                    contexts
+                )
+            )
+
+            if not regional_values:
+
+                return None
+
+            # ------------------------------------------------
+            # MOST / HIGHEST
+            # ------------------------------------------------
+
+            if (
                 "most" in q
                 or "highest" in q
-            )
-        ):
+            ):
 
-            regional_values = (
-                self.extract_regional_revenue(
-                    contexts
+                region, value = max(
+                    regional_values.items(),
+                    key=lambda item: item[1],
                 )
-            )
 
-            if not regional_values:
-                return None
+                return (
+                    f"{region} generated the most revenue, "
+                    f"with {self.format_number(value)} "
+                    f"million US dollars."
+                )
 
-            region, value = max(
-                regional_values.items(),
-                key=lambda item: item[1],
-            )
+            # ------------------------------------------------
+            # LEAST / LOWEST
+            # ------------------------------------------------
 
-            return (
-                f"{region} generated the most revenue, "
-                f"with {self.format_number(value)} "
-                f"million US dollars."
-            )
-
-        # ====================================================
-        # REGIONAL MINIMUM
-        # ====================================================
-
-        if (
-            "which region" in q
-            and (
+            if (
                 "least" in q
                 or "lowest" in q
-            )
-        ):
+            ):
 
-            regional_values = (
-                self.extract_regional_revenue(
-                    contexts
+                region, value = min(
+                    regional_values.items(),
+                    key=lambda item: item[1],
                 )
-            )
 
-            if not regional_values:
-                return None
-
-            region, value = min(
-                regional_values.items(),
-                key=lambda item: item[1],
-            )
-
-            return (
-                f"{region} generated the least revenue, "
-                f"with {self.format_number(value)} "
-                f"million US dollars."
-            )
+                return (
+                    f"{region} generated the least revenue, "
+                    f"with {self.format_number(value)} "
+                    f"million US dollars."
+                )
 
         # ====================================================
-        # REVENUE VS OPERATING INCOME DIFFERENCE
+        # DIFFERENCE BETWEEN TWO METRICS
         # ====================================================
 
         if (
-            "difference between" in q
+            analysis.intent == CALCULATION
+            and "difference between" in q
             and "revenue" in q
             and "operating income" in q
         ):
@@ -480,26 +425,21 @@ class CalculationEngine:
                 )
             )
 
-            years = self.detect_years(
-                question
-            )
-
-            if years:
-
-                year = years[-1]
-
-            elif 2025 in revenue_values:
-
-                year = 2025
-
-            else:
+            if not revenue_values or not income_values:
 
                 return None
+
+            if not analysis.years:
+
+                return None
+
+            year = analysis.years[-1]
 
             if (
                 year not in revenue_values
                 or year not in income_values
             ):
+
                 return None
 
             difference = (
@@ -515,14 +455,13 @@ class CalculationEngine:
             )
 
         # ====================================================
-        # METRIC CALCULATIONS
+        # METRIC DETECTION
         # ====================================================
 
-        metric = self.detect_metric(
-            question
-        )
+        metric = analysis.metric
 
         if not metric:
+
             return None
 
         values = self.extract_year_values(
@@ -531,17 +470,44 @@ class CalculationEngine:
         )
 
         if not values:
+
             return None
 
-        years = self.detect_years(
-            question
-        )
+        years = analysis.years
 
         # ====================================================
-        # INCREASE / DECREASE BETWEEN TWO YEARS
+        # DIRECT LOOKUP
         # ====================================================
 
-        if len(years) >= 2:
+        if analysis.intent == DIRECT_LOOKUP:
+
+            if not years:
+
+                return None
+
+            year = years[-1]
+
+            if year not in values:
+
+                return None
+
+            value = values[year]
+
+            return (
+                f"{metric.capitalize()} in "
+                f"{year} was "
+                f"{self.format_number(value)} "
+                f"million US dollars."
+            )
+
+        # ====================================================
+        # CALCULATION BETWEEN TWO YEARS
+        # ====================================================
+
+        if (
+            analysis.intent == CALCULATION
+            and len(years) >= 2
+        ):
 
             old_year = years[0]
             new_year = years[1]
@@ -550,6 +516,7 @@ class CalculationEngine:
                 old_year not in values
                 or new_year not in values
             ):
+
                 return None
 
             old_value = values[old_year]
@@ -569,6 +536,7 @@ class CalculationEngine:
             ):
 
                 if old_value == 0:
+
                     return None
 
                 percentage = (
@@ -592,7 +560,7 @@ class CalculationEngine:
                 )
 
             # ------------------------------------------------
-            # ABSOLUTE INCREASE / DECREASE
+            # ABSOLUTE DIFFERENCE
             # ------------------------------------------------
 
             if difference > 0:
@@ -618,48 +586,7 @@ class CalculationEngine:
                 f"from {old_year} to {new_year}."
             )
 
-        # ====================================================
-        # SINGLE-YEAR DIFFERENCE / COMPARISON
-        # ====================================================
-
-        if len(years) == 1:
-
-            year = years[0]
-
-            if year not in values:
-                return None
-
-            # This section intentionally returns None for
-            # ordinary factual questions so Ollama handles
-            # them normally.
-            return None
-
         return None
-
-    # --------------------------------------------------------
-    # NUMBER FORMATTER
-    # --------------------------------------------------------
-
-    @staticmethod
-    def format_number(
-        value: float,
-    ) -> str:
-        """
-        Format numbers cleanly.
-
-        30.0 -> 30
-        20.5 -> 20.5
-        """
-
-        if value.is_integer():
-
-            return str(
-                int(value)
-            )
-
-        return f"{value:.2f}".rstrip(
-            "0"
-        ).rstrip(".")
 
 
 # ============================================================
@@ -668,222 +595,146 @@ class CalculationEngine:
 
 class RAGPipeline:
     """
-    Retrieval-Augmented Generation pipeline.
+    Complete OmniBrain retrieval-augmented generation pipeline.
 
-    Flow:
+    Pipeline:
 
-        User Question
-              ↓
-        ContextBuilder
-              ↓
-        Retrieved Chunks
-              ↓
-        Calculation Engine
-              ↓
-        Ollama (if calculation not handled)
-              ↓
+        User Query
+             ↓
+        Query Analyzer
+             ↓
+        Context Retrieval
+             ↓
+        Calculation Engine / LLM
+             ↓
         Final Answer
     """
 
     def __init__(
         self,
-        context_builder: Optional[ContextBuilder] = None,
-        llm: Optional[Any] = None,
-        limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        model: str = OLLAMA_MODEL,
+        retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
     ):
 
-        self.context_builder = (
-            context_builder
-            or ContextBuilder()
-        )
+        self.context_builder = ContextBuilder()
 
-        self.llm = (
-            llm
-            or OllamaLLM()
+        self.query_analyzer = QueryAnalyzer()
+
+        self.llm = OllamaLLM(
+            model=model
         )
 
         self.calculation_engine = (
             CalculationEngine()
         )
 
-        self.limit = limit
+        self.retrieval_limit = retrieval_limit
 
     # ========================================================
-    # RETRIEVAL
+    # BUILD PROMPT
     # ========================================================
 
-    def retrieve(
-        self,
-        question: str,
-    ) -> list[RetrievedContext]:
-        """
-        Retrieve relevant document chunks.
-        """
-
-        return self.context_builder.retrieve_context(
-            query=question,
-            limit=self.limit,
-        )
-
-    # ========================================================
-    # CONTEXT BUILDING
-    # ========================================================
-
-    def build_context(
-        self,
-        contexts: list[RetrievedContext],
-    ) -> str:
-        """
-        Convert retrieved contexts into structured
-        document context.
-        """
-
-        if not contexts:
-
-            return (
-                "NO RELEVANT DOCUMENT "
-                "CONTEXT WAS FOUND."
-            )
-
-        context_parts = []
-
-        for index, context in enumerate(
-            contexts,
-            start=1,
-        ):
-
-            context_parts.append(
-                (
-                    f"SOURCE {index}\n"
-                    f"Document ID: "
-                    f"{context.document_id}\n"
-                    f"Page: "
-                    f"{context.page_number}\n"
-                    f"Chunk ID: "
-                    f"{context.chunk_id}\n"
-                    f"Similarity Score: "
-                    f"{context.score:.6f}\n\n"
-                    f"{context.text}"
-                )
-            )
-
-        return "\n\n".join(
-            context_parts
-        )
-
-    # ========================================================
-    # PROMPT BUILDING
-    # ========================================================
-
+    @staticmethod
     def build_prompt(
-        self,
         question: str,
         contexts: list[RetrievedContext],
     ) -> str:
-        """
-        Build grounded prompt for Ollama.
-        """
 
-        context_text = self.build_context(
-            contexts
+        context_text = "\n\n".join(
+            (
+                f"[Document: {context.document_id} | "
+                f"Page: {context.page_number}]\n"
+                f"{context.text}"
+            )
+            for context in contexts
         )
 
-        prompt = f"""
-DOCUMENT CONTEXT
-================
+        return f"""
+DOCUMENT CONTEXT:
 
 {context_text}
 
-
-USER QUESTION
-=============
+USER QUESTION:
 
 {question}
 
-
-INSTRUCTIONS
-============
-
-Answer the user's exact question using ONLY the
-document context.
-
-Do not use outside knowledge.
-
-Do not invent information.
-
-If the answer is directly stated, provide it.
-
-If multiple pieces of information are required,
-combine them.
-
-If the question asks for a comparison, compare
-the relevant values.
-
-If the question asks for arithmetic, calculate
-using ONLY the values in the document.
-
-If the required information is not available,
-answer exactly:
-
-"The provided documents do not contain enough information to answer this question."
-
-Do not answer with a related fact.
-
-Keep the answer concise.
-
-FINAL ANSWER:
-""".strip()
-
-        return prompt
+Answer the user's question using only the document context above.
+"""
 
     # ========================================================
-    # GENERATION
+    # ASK
     # ========================================================
 
-    def generate(
+    def ask(
         self,
         question: str,
     ) -> RAGResult:
-        """
-        Execute the complete RAG pipeline.
-        """
 
-        # ----------------------------------------------------
-        # STEP 1 — RETRIEVE
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 1 — QUERY ANALYSIS
+        # ====================================================
 
-        contexts = self.retrieve(
+        analysis = self.query_analyzer.analyze(
             question
         )
 
-        # ----------------------------------------------------
-        # STEP 2 — CALCULATION ENGINE
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 2 — OUT OF SCOPE
+        # ====================================================
 
-        calculation_answer = (
+        if analysis.intent == OUT_OF_SCOPE:
+
+            return RAGResult(
+                answer=FALLBACK_ANSWER,
+                contexts=[],
+                analysis=analysis,
+            )
+
+        # ====================================================
+        # STEP 3 — RETRIEVAL
+        # ====================================================
+
+        contexts = (
+            self.context_builder.retrieve_context(
+                query=analysis.normalized_query,
+                limit=self.retrieval_limit,
+            )
+        )
+
+        if not contexts:
+
+            return RAGResult(
+                answer=FALLBACK_ANSWER,
+                contexts=[],
+                analysis=analysis,
+            )
+
+        # ====================================================
+        # STEP 4 — DETERMINISTIC CALCULATION
+        # ====================================================
+
+        calculated_answer = (
             self.calculation_engine.calculate(
                 question=question,
+                analysis=analysis,
                 contexts=contexts,
             )
         )
 
-        # ----------------------------------------------------
-        # STEP 3 — USE CALCULATION RESULT
-        # ----------------------------------------------------
-
-        if calculation_answer:
+        if calculated_answer:
 
             return RAGResult(
-                answer=calculation_answer,
+                answer=calculated_answer,
                 contexts=contexts,
+                analysis=analysis,
             )
 
-        # ----------------------------------------------------
-        # STEP 4 — FALL BACK TO OLLAMA
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 5 — LLM FALLBACK
+        # ====================================================
 
         prompt = self.build_prompt(
-            question=question,
+            question=analysis.normalized_query,
             contexts=contexts,
         )
 
@@ -891,212 +742,151 @@ FINAL ANSWER:
             prompt
         )
 
-        # ----------------------------------------------------
-        # STEP 5 — EMPTY ANSWER CHECK
-        # ----------------------------------------------------
-
-        if not answer:
-
-            answer = FALLBACK_ANSWER
+        # ====================================================
+        # STEP 6 — RETURN RESULT
+        # ====================================================
 
         return RAGResult(
             answer=answer,
             contexts=contexts,
+            analysis=analysis,
         )
 
     # ========================================================
-    # CLEANUP
+    # CLOSE
     # ========================================================
 
     def close(self) -> None:
-        """
-        Close resources.
-        """
 
         self.context_builder.close()
-
-
-# ============================================================
-# DISPLAY HELPERS
-# ============================================================
-
-def print_header(
-    title: str,
-) -> None:
-    """
-    Print a consistent section header.
-    """
-
-    print()
-    print("=" * 60)
-    print(title)
-    print("=" * 60)
-
-
-def print_sources(
-    contexts: list[RetrievedContext],
-) -> None:
-    """
-    Print retrieved document sources.
-    """
-
-    print_header(
-        "RETRIEVED SOURCES"
-    )
-
-    if not contexts:
-
-        print()
-        print(
-            "No relevant context found."
-        )
-
-        return
-
-    for index, context in enumerate(
-        contexts,
-        start=1,
-    ):
-
-        print()
-        print(
-            f"--- Source {index} ---"
-        )
-
-        print(
-            f"Document ID: "
-            f"{context.document_id}"
-        )
-
-        print(
-            f"Chunk ID: "
-            f"{context.chunk_id}"
-        )
-
-        print(
-            f"Page: "
-            f"{context.page_number}"
-        )
-
-        print(
-            f"Score: "
-            f"{context.score:.6f}"
-        )
-
-        print(
-            f"Text: "
-            f"{context.text[:1000]}"
-        )
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
+if __name__ == "__main__":
 
-    pipeline = RAGPipeline(
-        limit=5
-    )
+    pipeline = RAGPipeline()
 
     try:
 
-        print_header(
-            "OMNIBRAIN RAG PIPELINE"
-        )
-
+        print()
+        print("=" * 60)
+        print("OMNIBRAIN RAG PIPELINE")
+        print("=" * 60)
+        print()
+        print("LLM: Ollama")
+        print(f"Model: {OLLAMA_MODEL}")
         print()
 
-        print(
-            "LLM: Ollama"
-        )
+        while True:
 
-        print(
-            f"Model: {OLLAMA_MODEL}"
-        )
+            question = input(
+                "Enter your question: "
+            ).strip()
 
-        print()
+            if not question:
 
-        question = input(
-            "Enter your question: "
-        ).strip()
+                continue
 
-        if not question:
+            if question.lower() in {
+                "exit",
+                "quit",
+            }:
 
-            print()
-            print(
-                "Please enter a question."
+                break
+
+            result = pipeline.ask(
+                question
             )
 
-            return
+            print()
+            print("=" * 60)
+            print("QUERY ANALYSIS")
+            print("=" * 60)
 
-        # ----------------------------------------------------
-        # RUN PIPELINE
-        # ----------------------------------------------------
+            if result.analysis:
 
-        result = pipeline.generate(
-            question
-        )
+                print(
+                    f"Normalized: "
+                    f"{result.analysis.normalized_query}"
+                )
 
-        # ----------------------------------------------------
-        # QUESTION
-        # ----------------------------------------------------
+                print(
+                    f"Intent: "
+                    f"{result.analysis.intent}"
+                )
 
-        print_header(
-            "QUESTION"
-        )
+                print(
+                    f"Metric: "
+                    f"{result.analysis.metric}"
+                )
 
-        print(
-            question
-        )
+                print(
+                    f"Years: "
+                    f"{result.analysis.years}"
+                )
 
-        # ----------------------------------------------------
-        # ANSWER
-        # ----------------------------------------------------
+                print(
+                    f"Confidence: "
+                    f"{result.analysis.confidence}"
+                )
 
-        print_header(
-            "ANSWER"
-        )
+            print()
+            print("=" * 60)
+            print("QUESTION")
+            print("=" * 60)
+            print(question)
 
-        print(
-            result.answer
-        )
+            print()
+            print("=" * 60)
+            print("ANSWER")
+            print("=" * 60)
+            print(result.answer)
 
-        # ----------------------------------------------------
-        # SOURCES
-        # ----------------------------------------------------
+            print()
+            print("=" * 60)
+            print("RETRIEVED SOURCES")
+            print("=" * 60)
 
-        print_sources(
-            result.contexts
-        )
+            for index, context in enumerate(
+                result.contexts,
+                start=1,
+            ):
 
-    except KeyboardInterrupt:
+                print()
+                print(
+                    f"--- Source {index} ---"
+                )
 
-        print()
-        print()
-        print(
-            "Pipeline interrupted."
-        )
+                print(
+                    f"Document ID: "
+                    f"{context.document_id}"
+                )
 
-    except Exception as error:
+                print(
+                    f"Chunk ID: "
+                    f"{context.chunk_id}"
+                )
 
-        print_header(
-            "ERROR"
-        )
+                print(
+                    f"Page: "
+                    f"{context.page_number}"
+                )
 
-        print(
-            f"{type(error).__name__}: "
-            f"{error}"
-        )
+                print(
+                    f"Score: "
+                    f"{context.score:.6f}"
+                )
+
+                print(
+                    f"Text: "
+                    f"{context.text[:1000]}"
+                )
+
+            print()
 
     finally:
 
         pipeline.close()
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    main()

@@ -1,6 +1,6 @@
-from document_ingestion import ingest_document
-from embedder import TextEmbedder
-from vector_store import VectorStore
+from src.document_ingestion import ingest_document
+from src.embedder import TextEmbedder
+from src.vector_store import VectorStore
 
 
 def index_document(pdf_path: str) -> None:
